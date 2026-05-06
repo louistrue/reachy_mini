@@ -168,25 +168,62 @@ Path: `~/.config/clawson/config.toml` *(gitignored, never committed)*
 ```toml
 [github]
 token = "ghp_…"
-watched_repos = ["me/repo1", "me/repo2"]
+watch_mode = "all_member_repos"     # discovered via /user/repos at startup
+refresh_repos_interval_minutes = 60
 poll_interval_seconds = 30
 
 [vercel]
 token = "…"
-team_id = "…"           # omit for personal account
-watched_projects = ["proj1"]
+# personal account — no team_id
+watched_projects = []               # empty = all personal projects
 poll_interval_seconds = 60
 
 [focus]
 default_mode = "normal"
-quiet_hours = ["22:00", "07:30"]
+active_hours = ["09:00", "18:00"]   # robot reacts to events only in this window
+                                    # outside: silent (standup is the one exception)
 standup_time = "07:30"
 standup_days = ["mon", "tue", "wed", "thu", "fri"]
+standup_triggers = ["scheduled", "face_detect", "widget", "voice"]
 
 [voice]
 provider = "openai_realtime"
-persona = "concise_dry"
+persona = "concise_warm"            # short sentences, dry-but-not-cold, small-robot energy
+
+[widget]
+host = "127.0.0.1"
+port = 7860
+mode = "browser_only"               # bookmark http://localhost:7860/widget
 ```
+
+---
+
+## Desktop widget (laptop control surface)
+
+Antennas alone aren't enough — you want quick visual access to mode, queued
+events, and triggers from the laptop without breaking flow.
+
+**Surface:**
+- Current focus mode (deep / normal / available / snoozed-until-HH:MM)
+- One-click snooze: 15m · 1h · 4h · until tomorrow
+- "Trigger standup now" button
+- Queued events count + expandable list (when `deep` is suppressing things)
+- Repo / project quick-mute toggles
+- Clawson status indicator (connected to robot · MCP servers green)
+- Optional: live face-track preview thumbnail
+
+**Implementation:**
+- Backend: a small FastAPI module inside the clawson process exposing
+  `/widget/state`, `/widget/mode`, `/widget/snooze`, `/widget/standup`, `/widget/queue`,
+  `/widget/mute`. Same process as the briefing engine — shared state, no IPC.
+- Frontend: a single static HTML + vanilla JS panel served at the same origin
+  (`http://localhost:7860/widget`). Tailwind via CDN; keep it under 200 lines.
+  Auto-refresh state via SSE so mode changes from antenna press are reflected
+  live.
+- No native wrapper — user bookmarks the URL and keeps the tab open.
+
+**Talks to the robot indirectly:** widget sends commands to the same event bus
+the antenna handler uses. Antenna press and widget click are equivalent inputs.
 
 ---
 
@@ -199,7 +236,8 @@ persona = "concise_dry"
 | **2 — GitHub MCP + filters + gestures** | Poller, normalized events, gesture+audio cues; no TTS preview yet | Push a failing CI run → robot droops within 30s |
 | **3 — TTS preview + standup** | Per-mode TTS gating, morning standup rollup | At 07:30 robot wakes me up with overnight rollup |
 | **4 — Vercel MCP** | Second source proves the abstraction | Trigger a Vercel deploy fail → distinct gesture + cue |
-| **5 — Polish** | Persona prompts, debounce tuning, error recovery, token-refresh, "what's queued?" command | Yank wifi 30s → graceful re-poll, no missed events |
+| **5 — Desktop widget** | Tray/popover panel; mode + snooze + standup-now + queue | Click "snooze 1h" in widget → robot goes quiet, returns at the right time |
+| **6 — Polish** | Persona prompts, debounce tuning, error recovery, token-refresh, "what's queued?" command | Yank wifi 30s → graceful re-poll, no missed events |
 
 ---
 
@@ -216,31 +254,38 @@ persona = "concise_dry"
 
 ## Open questions
 
-Please answer inline; we lock these before Phase 0.
-
 1. **Repo allowlist for GitHub v1** — list specific repos, or "all repos I'm a member of"?
-   - Answer: ___
+   - **Answer: all repos I'm a member of.**
+   - *Implication:* poll `/user/repos` once at startup to discover the list, refresh hourly. Watch out for rate-limit if the count is high (>100); if so, switch to event-stream API.
 
-2. **Vercel scope** — personal account or a team? If team, provide `team_id`.
-   - Answer: ___
+2. **Vercel scope** — personal account or a team?
+   - **Answer: personal account.** `team_id` omitted from config.
 
 3. **Standup time + days** — default `07:30 weekdays`. Change?
-   - Answer: ___
+   - **Answer: ok as default.**
 
 4. **Quiet hours** — default `22:00 → 07:30`. Change?
-   - Answer: ___
+   - **Answer: invert it — robot is active 09:00 → 18:00. Outside that window, silent except for the morning standup.**
+   - *Implication:* config field renamed from `quiet_hours` to `active_hours = ["09:00", "18:00"]`. Standup at 07:30 is a special-cased proactive break in the silence (like an alarm); after the standup the robot returns to quiet until 09:00.
 
-5. **Persona / voice style** — `concise_dry`, `warm_chatty`, `formal_butler`, custom? Drives TTS system prompt and word choice.
-   - Answer: ___
+5. **Persona / voice style**
+   - **Answer: concise but not too dry — "small-robot energy."**
+   - *Persona name:* `concise_warm`. System-prompt direction: short sentences, occasional dry humor, never robotic-monotone, leans curious-and-helpful, never sycophantic. No emoji in TTS output.
 
-6. **Where to host the fork** — your personal GitHub (private/public)? Org? Name `clawson` ok or rename?
-   - Answer: ___
+6. **Where to host the fork** — name `clawson` ok?
+   - **Answer: ok.** Fork to user's personal GitHub as `clawson`.
 
-7. **Gesture vocabulary** — table above ok, or want different motions for any source?
-   - Answer: ___
+7. **Gesture vocabulary + control surface**
+   - **Answer: gesture table is fine, but we also need a desktop widget on the laptop for triggers / mode / snooze.**
+   - *Adds:* see new "Desktop widget" section below.
 
 8. **Standup trigger** — scheduled only, head-pat only, or both?
-   - Answer: ___
+   - **Answer: all four surfaces — scheduled (07:30 weekdays), head-pat / face-detect, widget button, voice command.**
+   - *Implication:* one canonical `run_standup()` entry point; each trigger calls it with a `source` tag for logging. Voice command goes through the existing OpenAI Realtime loop matching phrases like "give me the standup" / "morning briefing" / "what did I miss". Face-detect uses clawbody's existing tracker — fires when a face stays in frame for ≥3s after first detection of the day.
+
+9. **Widget style** — tray icon + popover, floating mini-window, or browser tab?
+   - **Answer: browser tab only.**
+   - *Implication:* no `pywebview` / `pystray` / `rumps` dependency. FastAPI serves a single static panel at `http://localhost:7860/widget`; user bookmarks it. Simplest to build, simplest to debug. Can graduate to a tray wrapper later if it's worth it.
 
 ---
 
